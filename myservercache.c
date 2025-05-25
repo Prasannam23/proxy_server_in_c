@@ -16,6 +16,7 @@
 #include <semaphore.h>
 
 #define MAX_THREADS 10
+#define MAX_BYTES 4096
 
 typedef struct cache {
     char* data;
@@ -25,99 +26,150 @@ typedef struct cache {
     struct cache* next;
 } cache;
 
-// Cache-related function declarations
 const cache* find(char* url);
 int add_cache(char* data, int size, char* url);
 void remove_cache();
 
-// Global variables
 int portnumber = 5000;
 int proxy_socketid;
 pthread_t tid[MAX_THREADS];
 sem_t semaphore;
 pthread_mutex_t lock;
 cache* head = NULL;
-int cache_size = 0;
+
+void* thread_fn(void* socketNew) {
+    sem_wait(&semaphore);
+
+    int socket = *((int*)socketNew);
+    char *buffer = (char*)calloc(MAX_BYTES, sizeof(char));
+    if (!buffer) {
+        perror("Buffer allocation failed");
+        close(socket);
+        sem_post(&semaphore);
+        return NULL;
+    }
+
+    int bytes_recv = recv(socket, buffer, MAX_BYTES, 0);
+    while (bytes_recv > 0 && strstr(buffer, "\r\n\r\n") == NULL) {
+        int len = strlen(buffer);
+        bytes_recv = recv(socket, buffer + len, MAX_BYTES - len, 0);
+    }
+
+    if (bytes_recv > 0) {
+        // Create a copy of the request
+        char *tempReq = strdup(buffer);
+
+        pthread_mutex_lock(&lock);
+        const cache* cached = find(tempReq);
+        pthread_mutex_unlock(&lock);
+
+        if (cached != NULL) {
+            // Cache hit
+            int pos = 0;
+            while (pos < cached->len) {
+                int chunk = (cached->len - pos < MAX_BYTES) ? (cached->len - pos) : MAX_BYTES;
+                send(socket, cached->data + pos, chunk, 0);
+                pos += chunk;
+            }
+            printf("Data served from cache.\n");
+        } else {
+            // Parse and forward
+            ParsedRequest* request = ParsedRequest_create();
+            if (ParsedRequest_parse(request, buffer, bytes_recv) == 0) {
+                if (strcmp(request->method, "GET") == 0 &&
+                    request->host && request->path &&
+                    checkHTTPversion(request->version) == 1) {
+
+                    int res = handle_request(socket, request, tempReq);
+                    if (res == -1) {
+                        sendErrorMessage(socket, 500);
+                    }
+                } else {
+                    sendErrorMessage(socket, 500);
+                }
+            } else {
+                printf("Failed to parse request.\n");
+                sendErrorMessage(socket, 400);
+            }
+            ParsedRequest_destroy(request);
+        }
+        free(tempReq);
+    } else if (bytes_recv < 0) {
+        perror("recv failed");
+    } else {
+        printf("Client disconnected.\n");
+    }
+
+    free(buffer);
+    shutdown(socket, SHUT_RDWR);
+    close(socket);
+    sem_post(&semaphore);
+    return NULL;
+}
 
 int main(int argc, char* argv[]) {
+    struct sockaddr_in server_addr, client_addr;
     int client_socketid;
     socklen_t client_len;
-    struct sockaddr_in server_addr, client_addr;
 
-    // Check arguments
     if (argc == 2) {
         portnumber = atoi(argv[1]);
     } else {
-        printf("Usage: %s <portnumber>\n", argv[0]);
-        exit(1);
+        fprintf(stderr, "Usage: %s <portnumber>\n", argv[0]);
+        exit(EXIT_FAILURE);
     }
 
-    printf("Starting Proxy Server at port: %d\n", portnumber);
+    printf("Starting Proxy Server on port %d...\n", portnumber);
 
-    // Initialize semaphore and mutex
     sem_init(&semaphore, 0, MAX_THREADS);
     pthread_mutex_init(&lock, NULL);
 
-    // Create proxy server socket
     proxy_socketid = socket(AF_INET, SOCK_STREAM, 0);
-
-    if(proxy_socketid<0){
-        perror("error in creating a socket");
-        exit(1);
+    if (proxy_socketid < 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
     }
 
-    int resuse = 1;
-
-    if(setsockopt(proxy_socketid,SQL_SOCKET,SO_REUSEADDR,(const char*)&reuse,sizeof(reuse))){
-        perror("setSockOpt not working");
+    int reuse = 1;
+    if (setsockopt(proxy_socketid, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        perror("setsockopt failed");
+        exit(EXIT_FAILURE);
     }
 
-    bzero((char*)&server_addr,sizeof(server_addr))
-
+    memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(portnumber);
-    server_addr.sin_addr.s_addr= INADDR_ANY;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
 
-    if(bind(proxy_socketid,(struct sockaddr*)&server_addr,sizeof(server_addr)<0)){
-      perror("Port is not available");
-      exit(1);
+    if (bind(proxy_socketid, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Bind failed");
+        exit(EXIT_FAILURE);
     }
 
-    printf("Binding on port %d\n",port_number);
-
-    int listening_status = listen(proxy_socketid,MAX_THREADS);
-
-    if(listening_status<0){
-        perror("Error in listening\n");
-        exit(1)
-    }
-  int i = 0 ;
-  int Connected_socketid[MAX_THREADS];
-
-  while(1){
-    bzero((char*)&client_addr,sizeof(client_addr));
-    clientlenght = sizeof(client_addr);
-    client_socketid = accept(proxy_socketid,(struct sockaddr *)&client_addr,(socklen_t*)&clientlenght);
-
-    if (client_socketid<0){
-        printf("couldn't connect");
-        exit(1);
-    }
-    else{
-        Connected_socketid[i] = client_socketid;
+    if (listen(proxy_socketid, MAX_THREADS) < 0) {
+        perror("Listen failed");
+        exit(EXIT_FAILURE);
     }
 
-    struct sockaddr_in * client_pt = (struct sockaddr_in *)&client_addr;
-    struct in_addr ip_addr = client_pt->sin_addr;
-    char str[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET,&ip_addr,str,INET_ADDRSTRLEN);
-    printf("client is connected with the port number %d and ip address is %s\n",ntohs(client_addr.sin_port));
+    printf("Proxy server is listening...\n");
 
-  }
+    int i = 0;
+    while (1) {
+        client_len = sizeof(client_addr);
+        client_socketid = accept(proxy_socketid, (struct sockaddr*)&client_addr, &client_len);
+        if (client_socketid < 0) {
+            perror("Accept failed");
+            continue;
+        }
 
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str));
+        printf("Client connected: IP=%s, Port=%d\n", ip_str, ntohs(client_addr.sin_port));
 
+        pthread_create(&tid[i % MAX_THREADS], NULL, thread_fn, &client_socketid);
+        i++;
+    }
 
-  //htons converts the computers native host byte order to network byte order
-// sockaddr_in in c is a struct used for storing address information for an IPv4 socket 
-
+    close(proxy_socketid);
+    return 0;
 }
