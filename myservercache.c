@@ -10,25 +10,23 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
+#include "map.h"
 #include <sys/wait.h>
 #include <errno.h>
 #include <pthread.h>
-#include <semaphore.h>
+#include <semaphore.h> // For POSIX threads and semaphores
 
 #define MAX_THREADS 10
 #define MAX_BYTES 4096
-
-typedef struct cache {
-    char* data;
-    int len;
-    char* url;
-    time_t time_track_lru;
-    struct cache* next;
-} cache;
+#include "cache.h"
+#include "map.h"
+#include "freqmap.h"
+#include "lfu.h"
+#include "proxy_parse.h"
 
 const cache* find(char* url);
-int add_cache(char* data, int size, char* url);
-void remove_cache();
+int add_cache(char* data, int size, char* url); // Adds data to the cache
+
 
 int portnumber = 5000;
 int proxy_socketid;
@@ -60,7 +58,15 @@ void* thread_fn(void* socketNew) {
         char *tempReq = strdup(buffer);
 
         pthread_mutex_lock(&lock);
-        const cache* cached = find(tempReq);
+        const cache* cached = find(tempReq); // Check if the request is in the cache
+        if (cached == NULL) {
+            // If not found, add to cache
+            if (add_cache(tempReq, bytes_recv, tempReq) == -1) {//what to add in data  as we do not have a storage so we need to give a string ourself
+                remove_cache();
+                 // Remove the oldest cache entry if needed
+                 add_cache(tempReq, bytes_recv, tempReq)
+            }
+        }
         pthread_mutex_unlock(&lock);
 
         if (cached != NULL) {
