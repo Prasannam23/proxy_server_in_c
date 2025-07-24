@@ -77,7 +77,7 @@ make install
 make uninstall
 ```
 
-## 🚦 Usage
+##  Usage
 
 ### Basic Usage
 ```bash
